@@ -146,6 +146,14 @@ def create_schema() -> None:
             execution_id TEXT REFERENCES workflow_executions(id),
             UNIQUE (user_id, resource_id)
         );
+
+        CREATE TABLE IF NOT EXISTS user_studio_companies (
+            id         TEXT PRIMARY KEY,
+            user_id    TEXT NOT NULL UNIQUE REFERENCES users(id) ON DELETE CASCADE,
+            studio_id  TEXT NOT NULL UNIQUE,
+            name       TEXT NOT NULL,
+            created_at TEXT DEFAULT (datetime('now'))
+        );
     """)
     conn.commit()
     conn.close()
@@ -217,9 +225,9 @@ def seed_data() -> None:
         (1, "select_organization", "Select Organization", "manual",
          "Admin selects existing partner organization from list"),
         (2, "input_user_details", "Input User Details", "manual",
-         "Admin inputs user details and selects Studio companies to grant access to"),
-        (3, "add_user_to_studio_companies", "Add User to Studio Companies", "auto",
-         "Add user to selected Studio companies (TEST + PROD)"),
+         "Admin inputs user details. User will automatically receive their own personal Studio company."),
+        (3, "add_user_to_studio_companies", "Add User to Org Studio Groups", "auto",
+         "Add user to the org's Studio platform groups for shared resources"),
         (4, "add_user_to_metabase_group", "Add User to Metabase Group", "auto",
          "Add user to the org's Metabase system group"),
         (5, "add_user_to_teams_channel", "Add User to Teams Channel", "auto",

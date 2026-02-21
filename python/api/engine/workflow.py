@@ -43,12 +43,26 @@ def _build_context(execution_id: str, conn) -> dict[str, Any]:
 def _apply_step_output(execution_id: str, step_name: str, output: dict, conn) -> None:
     """Immediately persist relevant fields from an auto step's output."""
     execution = conn.execute(
-        "SELECT organization_id FROM workflow_executions WHERE id=?", (execution_id,)
+        "SELECT organization_id, user_id FROM workflow_executions WHERE id=?", (execution_id,)
     ).fetchone()
-    if not execution or not execution["organization_id"]:
+    if not execution:
         return
     org_id = execution["organization_id"]
+    user_id = execution["user_id"]
     now = _now()
+
+    if step_name == "create_studio_user_company" and user_id and output.get("studio_user_company_id"):
+        conn.execute(
+            "INSERT OR IGNORE INTO user_studio_companies (id, user_id, studio_id, name, created_at) VALUES (?,?,?,?,?)",
+            (str(uuid.uuid4()), user_id,
+             output["studio_user_company_id"],
+             output.get("studio_user_company_name", "Personal Studio"),
+             now)
+        )
+        return
+
+    if not org_id:
+        return
 
     if step_name == "clone_metabase_collection" and output.get("metabase_collection_id"):
         conn.execute(
@@ -126,14 +140,6 @@ def _finalize_new_partner_user(execution_id: str, conn) -> None:
     requested_by = execution["requested_by"]
     ctx = _build_context(execution_id, conn)
     now = _now()
-
-    selected_ids = ctx.get("selected_studio_company_ids", [])
-    if isinstance(selected_ids, list):
-        for sc_id in selected_ids:
-            conn.execute(
-                "INSERT OR IGNORE INTO user_studio_access (id,user_id,studio_company_id,granted_at) VALUES (?,?,?,?)",
-                (str(uuid.uuid4()), user_id, sc_id, now)
-            )
 
     resources = conn.execute("SELECT id FROM resources").fetchall()
     for r in resources:

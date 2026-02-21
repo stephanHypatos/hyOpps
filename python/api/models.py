@@ -36,3 +36,20 @@ class ManualInputRequest(BaseModel):
 
     def to_dict(self) -> dict[str, Any]:
         return {k: v for k, v in self.model_dump().items() if v is not None}
+
+
+class UpdateUserRequest(BaseModel):
+    firstname: Optional[str] = None
+    lastname: Optional[str] = None
+    email: Optional[str] = None
+    password: Optional[str] = None
+    languages: Optional[list[str]] = None
+    skills: Optional[list[str]] = None
+    roles: Optional[list[str]] = None
+    organization_id: Optional[str] = None
+    app_role: Optional[str] = None
+
+
+class UpdateOrganizationRequest(BaseModel):
+    name: Optional[str] = None
+    account_types: Optional[list[str]] = None

@@ -111,3 +111,12 @@ def require_admin(user: dict = Depends(get_current_user)) -> dict:
     if user["app_role"] != "admin":
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Admin access required")
     return user
+
+
+def require_partner_admin(user: dict = Depends(get_current_user)) -> dict:
+    """Allows both 'admin' and 'partner_admin' roles. partner_admin must have an org."""
+    if user["app_role"] not in ("admin", "partner_admin"):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Partner admin access required")
+    if user["app_role"] == "partner_admin" and not user.get("organization_id"):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Partner admin has no assigned organization")
+    return user

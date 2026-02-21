@@ -3,7 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 
 from .database import create_schema, seed_data
-from .routes import auth, executions, organizations, users
+from .routes import auth, executions, organizations, users, partner
 
 
 @asynccontextmanager
@@ -31,6 +31,7 @@ app.include_router(auth.router, prefix="/api/auth", tags=["auth"])
 app.include_router(executions.router, prefix="/api/executions", tags=["executions"])
 app.include_router(organizations.router, prefix="/api/organizations", tags=["organizations"])
 app.include_router(users.router, prefix="/api/users", tags=["users"])
+app.include_router(partner.router, prefix="/api/partner", tags=["partner"])
 
 
 @app.get("/api/workflow-definitions")

@@ -5,6 +5,7 @@ Calls the FastAPI backend at API_URL (default: http://localhost:8000)
 
 import os
 import time
+from typing import Union
 import requests
 import streamlit as st
 
@@ -45,7 +46,7 @@ def _headers():
     return {}
 
 
-def api_get(path: str) -> list | dict:
+def api_get(path: str) -> Union[list, dict]:
     resp = requests.get(f"{API_URL}{path}", headers=_headers(), timeout=10)
     resp.raise_for_status()
     return resp.json()
@@ -57,15 +58,27 @@ def api_post(path: str, body: dict = None) -> dict:
     return resp.json()
 
 
-def poll_until_stable(execution_id: str, max_wait: float = 5.0) -> dict:
+def api_put(path: str, body: dict) -> dict:
+    resp = requests.put(f"{API_URL}{path}", json=body, headers=_headers(), timeout=10)
+    resp.raise_for_status()
+    return resp.json()
+
+
+def api_delete(path: str) -> dict:
+    resp = requests.delete(f"{API_URL}{path}", headers=_headers(), timeout=10)
+    resp.raise_for_status()
+    return resp.json()
+
+
+def poll_until_stable(execution_id: str, base: str = "/api/executions", max_wait: float = 5.0) -> dict:
     """Poll execution until status is not 'running'."""
     deadline = time.time() + max_wait
     while time.time() < deadline:
-        ex = api_get(f"/api/executions/{execution_id}")
+        ex = api_get(f"{base}/{execution_id}")
         if ex["status"] != "running":
             return ex
         time.sleep(0.4)
-    return api_get(f"/api/executions/{execution_id}")
+    return api_get(f"{base}/{execution_id}")
 
 
 # ── Status helpers ─────────────────────────────────────────────────────────
@@ -96,6 +109,10 @@ def step_num_color(status: str) -> str:
     return colors.get(status, "⚪")
 
 
+def _role_icon(role: str) -> str:
+    return {"admin": "🔑", "partner_admin": "🏢", "user": "👤"}.get(role, "👤")
+
+
 # ── Login ──────────────────────────────────────────────────────────────────
 
 def show_login():
@@ -115,13 +132,17 @@ def show_login():
                 data = api_post("/api/auth/login", {"email": email, "password": password})
                 st.session_state["token"] = data["token"]
                 st.session_state["user"] = data["user"]
-                st.session_state["page"] = "executions"
+                role = data["user"].get("app_role", "user")
+                if role == "partner_admin":
+                    st.session_state["page"] = "partner_dashboard"
+                else:
+                    st.session_state["page"] = "executions"
                 st.rerun()
             except Exception as e:
                 st.error(f"Login failed: {e}")
 
 
-# ── Sidebar ────────────────────────────────────────────────────────────────
+# ── Admin Sidebar ──────────────────────────────────────────────────────────
 
 def show_sidebar():
     with st.sidebar:
@@ -140,14 +161,13 @@ def show_sidebar():
             if st.button(label, use_container_width=True,
                          type="primary" if current == key else "secondary"):
                 st.session_state["page"] = key
-                # Clear any detail state
                 st.session_state.pop("viewing_execution_id", None)
                 st.session_state.pop("viewing_org_id", None)
                 st.rerun()
 
         st.divider()
         if st.button("Sign Out", use_container_width=True):
-            for k in ["token", "user", "page", "viewing_execution_id", "viewing_org_id"]:
+            for k in list(st.session_state.keys()):
                 st.session_state.pop(k, None)
             st.rerun()
 
@@ -163,7 +183,6 @@ def show_executions():
             st.session_state["page"] = "new_execution"
             st.rerun()
 
-    # Status filter
     filter_options = ["all", "pending", "running", "awaiting_input", "completed", "failed"]
     selected_filter = st.session_state.get("exec_filter", "all")
     cols = st.columns(len(filter_options))
@@ -268,6 +287,11 @@ def show_execution_detail():
         st.error(f"Failed to load execution: {e}")
         return
 
+    _show_execution_view(ex, exec_api_base="/api/executions")
+
+
+def _show_execution_view(ex: dict, exec_api_base: str):
+    """Shared execution detail renderer used by both admin and partner panels."""
     wf_labels = {"new_partner": "New Partner Onboarding", "new_partner_user": "New Partner User"}
     wf_label = wf_labels.get(ex["workflow_name"], ex["workflow_name"])
 
@@ -277,7 +301,6 @@ def show_execution_detail():
     with col2:
         st.markdown(status_badge(ex["status"]), unsafe_allow_html=True)
 
-    # Meta row
     meta_cols = st.columns(4)
     with meta_cols[0]:
         st.metric("Status", ex["status"].replace("_", " ").title())
@@ -293,22 +316,20 @@ def show_execution_detail():
     if ex["status"] == "running":
         with st.spinner("Processing steps…"):
             time.sleep(1)
-        ex = api_get(f"/api/executions/{exec_id}")
+        ex = api_get(f"{exec_api_base}/{ex['id']}")
 
     st.divider()
     st.markdown("### Steps")
 
     for step in ex.get("steps", []):
-        _render_step(step, ex)
+        _render_step(step, ex, exec_api_base)
 
 
-def _render_step(step: dict, ex: dict):
+def _render_step(step: dict, ex: dict, exec_api_base: str):
     status = step["status"]
     num_icon = step_num_color(status)
-    is_active = status == "awaiting_input"
 
     with st.container(border=True):
-        # Step header
         hc1, hc2, hc3, hc4 = st.columns([0.4, 4, 1.5, 1.5])
         with hc1:
             st.markdown(f"### {num_icon}")
@@ -320,13 +341,11 @@ def _render_step(step: dict, ex: dict):
         with hc4:
             st.markdown(status_badge(status), unsafe_allow_html=True)
 
-        # Completed auto step output
         if status == "completed" and step.get("output"):
             with st.expander("Output data", expanded=False):
                 for k, v in step["output"].items():
                     st.code(f"{k}: {v}", language=None)
 
-        # Completed manual step — show what was entered
         if status == "completed" and step.get("manual_input"):
             mi = {k: v for k, v in step["manual_input"].items()
                   if k != "selected_studio_company_ids" and v is not None}
@@ -341,25 +360,24 @@ def _render_step(step: dict, ex: dict):
                     if step.get("completed_by_email"):
                         st.caption(f"Confirmed by {step['completed_by_email']}")
 
-        # Failed step
         if status == "failed":
             st.error(f"Error: {step.get('error', 'Unknown error')}")
+            retry_path = f"{exec_api_base}/{ex['id']}/steps/{step['id']}/retry"
             if st.button("Retry", key=f"retry_{step['id']}", type="secondary"):
                 with st.spinner("Retrying…"):
                     try:
-                        api_post(f"/api/executions/{ex['id']}/steps/{step['id']}/retry")
+                        api_post(retry_path)
                         time.sleep(1.5)
                     except Exception as e:
                         st.error(str(e))
                 st.rerun()
 
-        # Awaiting input — show the appropriate form
         if status == "awaiting_input":
             st.divider()
-            _render_manual_form(step, ex)
+            _render_manual_form(step, ex, exec_api_base)
 
 
-def _render_manual_form(step: dict, ex: dict):
+def _render_manual_form(step: dict, ex: dict, exec_api_base: str):
     step_name = step["step_name"]
     step_id = step["id"]
     exec_id = ex["id"]
@@ -367,9 +385,9 @@ def _render_manual_form(step: dict, ex: dict):
     def _submit(data: dict):
         with st.spinner("Processing…"):
             try:
-                api_post(f"/api/executions/{exec_id}/steps/{step_id}/input", data)
+                api_post(f"{exec_api_base}/{exec_id}/steps/{step_id}/input", data)
                 time.sleep(0.5)
-                stable = poll_until_stable(exec_id)
+                poll_until_stable(exec_id, base=exec_api_base)
             except Exception as e:
                 st.error(str(e))
                 return
@@ -410,7 +428,6 @@ def _render_manual_form(step: dict, ex: dict):
             st.info(f"**Studio ID (TEST):** {ctx.get('studio_company_id_test', '—')}")
         with col2:
             st.info(f"**Studio ID (PROD):** {ctx.get('studio_company_id_prod', '—')}")
-
         with st.form(f"form_{step_id}"):
             cluster = st.selectbox("Cluster *", ["prod-eu", "prod-us"])
             scopes = st.text_input("Scopes", placeholder="read, write, admin")
@@ -442,15 +459,7 @@ def _render_manual_form(step: dict, ex: dict):
             _submit({"organization_id": org_options[selected_name]})
 
     elif step_name == "input_user_details":
-        org_id = ex.get("organization_id")
-        studio_companies = []
-        if org_id:
-            try:
-                org_detail = api_get(f"/api/organizations/{org_id}")
-                studio_companies = org_detail.get("studio_companies", [])
-            except Exception:
-                pass
-
+        st.info("This user will automatically receive their own personal Studio company upon onboarding.")
         with st.form(f"form_{step_id}"):
             col1, col2 = st.columns(2)
             with col1:
@@ -458,29 +467,13 @@ def _render_manual_form(step: dict, ex: dict):
             with col2:
                 lastname = st.text_input("Last Name *")
             email = st.text_input("Email *", placeholder="user@partner.com")
-
             col3, col4 = st.columns(2)
             with col3:
                 languages = st.text_input("Languages (comma-separated)", placeholder="en, de, fr")
             with col4:
                 skills = st.text_input("Skills (comma-separated)", placeholder="analytics, reporting")
             roles = st.text_input("Roles (comma-separated)", placeholder="analyst, viewer")
-
-            selected_companies: list[str] = []
-            if studio_companies:
-                st.markdown("**Studio Company Access**")
-                checked = {}
-                for sc in studio_companies:
-                    env_icon = "🟢" if sc["environment"] == "prod" else "🔵"
-                    checked[sc["id"]] = st.checkbox(
-                        f"{env_icon} {sc['name']} ({sc['environment'].upper()})",
-                        value=True,
-                        key=f"sc_{sc['id']}"
-                    )
-                selected_companies = [sc_id for sc_id, val in checked.items() if val]
-
             submitted = st.form_submit_button("Confirm & Continue", type="primary")
-
         if submitted:
             if not firstname or not lastname or not email:
                 st.warning("First name, last name, and email are required.")
@@ -492,10 +485,8 @@ def _render_manual_form(step: dict, ex: dict):
                     "languages": [x.strip() for x in languages.split(",") if x.strip()],
                     "skills": [x.strip() for x in skills.split(",") if x.strip()],
                     "roles": [x.strip() for x in roles.split(",") if x.strip()],
-                    "selected_studio_company_ids": selected_companies,
                 })
     else:
-        # Generic manual confirmation
         st.info("Complete the required action, then confirm below.")
         with st.form(f"form_{step_id}"):
             notes = st.text_area("Notes (optional)")
@@ -519,6 +510,11 @@ def _build_ctx(ex: dict) -> dict:
 def show_organizations():
     st.markdown("## Organizations")
 
+    editing_org = st.session_state.get("editing_org")
+    if editing_org:
+        _show_edit_org_form(editing_org)
+        return
+
     try:
         orgs = api_get("/api/organizations")
     except Exception as e:
@@ -531,7 +527,7 @@ def show_organizations():
 
     for org in orgs:
         with st.container(border=True):
-            c1, c2, c3 = st.columns([3, 2, 1])
+            c1, c2, c3, c4, c5 = st.columns([3, 2, 1, 1, 1])
             with c1:
                 st.markdown(f"**{org['name']}**")
                 types = org.get("account_types", ["partner"])
@@ -543,6 +539,63 @@ def show_organizations():
                     st.session_state["viewing_org_id"] = org["id"]
                     st.session_state["page"] = "org_detail"
                     st.rerun()
+            with c4:
+                if st.button("Edit", key=f"edit_org_{org['id']}", use_container_width=True):
+                    st.session_state["editing_org"] = org
+                    st.rerun()
+            with c5:
+                if st.button("Delete", key=f"del_org_{org['id']}", use_container_width=True, type="secondary"):
+                    st.session_state["confirm_delete_org"] = org["id"]
+                    st.rerun()
+
+        if st.session_state.get("confirm_delete_org") == org["id"]:
+            st.warning(f"Delete **{org['name']}**? All associated users, studio companies and integrations will also be removed.")
+            col_yes, col_no = st.columns(2)
+            with col_yes:
+                if st.button("Yes, delete", key=f"yes_del_org_{org['id']}", type="primary"):
+                    try:
+                        api_delete(f"/api/organizations/{org['id']}")
+                        st.session_state.pop("confirm_delete_org", None)
+                        st.rerun()
+                    except Exception as e:
+                        st.error(str(e))
+            with col_no:
+                if st.button("Cancel", key=f"no_del_org_{org['id']}"):
+                    st.session_state.pop("confirm_delete_org", None)
+                    st.rerun()
+
+
+def _show_edit_org_form(org: dict):
+    if st.button("← Back to Organizations"):
+        st.session_state.pop("editing_org", None)
+        st.rerun()
+
+    st.markdown(f"## Edit Organization — {org['name']}")
+
+    with st.form("edit_org_form"):
+        name = st.text_input("Organization Name *", value=org.get("name", ""))
+        current_types = org.get("account_types", ["partner"])
+        account_types_str = st.text_input(
+            "Account Types (comma-separated)",
+            value=", ".join(current_types)
+        )
+        submitted = st.form_submit_button("Save Changes", type="primary")
+
+    if submitted:
+        if not name:
+            st.warning("Organization name is required.")
+        else:
+            types = [t.strip() for t in account_types_str.split(",") if t.strip()]
+            try:
+                api_put(f"/api/organizations/{org['id']}", {
+                    "name": name,
+                    "account_types": types or ["partner"],
+                })
+                st.success("Organization updated.")
+                st.session_state.pop("editing_org", None)
+                st.rerun()
+            except Exception as e:
+                st.error(str(e))
 
 
 def show_org_detail():
@@ -614,6 +667,11 @@ def show_org_detail():
 def show_users():
     st.markdown("## Users")
 
+    editing_user = st.session_state.get("editing_user")
+    if editing_user:
+        _show_edit_user_form(editing_user)
+        return
+
     try:
         users = api_get("/api/users")
     except Exception as e:
@@ -626,17 +684,269 @@ def show_users():
 
     for user in users:
         with st.container(border=True):
-            c1, c2, c3, c4 = st.columns([3, 2, 2, 2])
+            c1, c2, c3, c4, c5 = st.columns([3, 2, 2, 1, 1])
             with c1:
                 st.markdown(f"**{user['firstname']} {user['lastname']}**")
                 st.caption(user["email"])
             with c2:
-                role_icon = "🔑" if user["app_role"] == "admin" else "👤"
-                st.markdown(f"{role_icon} `{user['app_role']}`")
+                icon = _role_icon(user["app_role"])
+                st.markdown(f"{icon} `{user['app_role']}`")
             with c3:
                 st.caption(f"Org: {user.get('organization_name') or '—'}")
+                if user.get("personal_studio_name"):
+                    st.caption(f"Studio: {user['personal_studio_name']}")
             with c4:
-                st.caption(user["created_at"][:10] if user.get("created_at") else "")
+                if st.button("Edit", key=f"edit_user_{user['id']}", use_container_width=True):
+                    st.session_state["editing_user"] = user
+                    st.rerun()
+            with c5:
+                if st.button("Delete", key=f"del_user_{user['id']}", use_container_width=True, type="secondary"):
+                    st.session_state["confirm_delete_user"] = user["id"]
+                    st.rerun()
+
+        if st.session_state.get("confirm_delete_user") == user["id"]:
+            st.warning(f"Delete **{user['firstname']} {user['lastname']}**? This cannot be undone.")
+            col_yes, col_no = st.columns(2)
+            with col_yes:
+                if st.button("Yes, delete", key=f"yes_del_user_{user['id']}", type="primary"):
+                    try:
+                        api_delete(f"/api/users/{user['id']}")
+                        st.session_state.pop("confirm_delete_user", None)
+                        st.rerun()
+                    except Exception as e:
+                        st.error(str(e))
+            with col_no:
+                if st.button("Cancel", key=f"no_del_user_{user['id']}"):
+                    st.session_state.pop("confirm_delete_user", None)
+                    st.rerun()
+
+
+def _show_edit_user_form(user: dict):
+    if st.button("← Back to Users"):
+        st.session_state.pop("editing_user", None)
+        st.rerun()
+
+    st.markdown(f"## Edit User — {user['firstname']} {user['lastname']}")
+
+    try:
+        orgs = api_get("/api/organizations")
+    except Exception:
+        orgs = []
+
+    org_options = {"— None —": None}
+    org_options.update({o["name"]: o["id"] for o in orgs})
+    current_org_name = user.get("organization_name") or "— None —"
+
+    with st.form("edit_user_form"):
+        col1, col2 = st.columns(2)
+        with col1:
+            firstname = st.text_input("First Name *", value=user.get("firstname", ""))
+        with col2:
+            lastname = st.text_input("Last Name *", value=user.get("lastname", ""))
+        email = st.text_input("Email *", value=user.get("email", ""))
+
+        col3, col4 = st.columns(2)
+        with col3:
+            languages = st.text_input("Languages", value=", ".join(user.get("languages") or []))
+        with col4:
+            skills = st.text_input("Skills", value=", ".join(user.get("skills") or []))
+        roles_val = st.text_input("Roles", value=", ".join(user.get("roles") or []))
+
+        col5, col6 = st.columns(2)
+        with col5:
+            org_names = list(org_options.keys())
+            org_index = org_names.index(current_org_name) if current_org_name in org_names else 0
+            selected_org = st.selectbox("Organization", org_names, index=org_index)
+        with col6:
+            all_roles = ["admin", "partner_admin", "user"]
+            current_role = user.get("app_role", "user")
+            role_index = all_roles.index(current_role) if current_role in all_roles else 2
+            app_role = st.selectbox("Role", all_roles, index=role_index)
+
+        st.divider()
+        st.caption("Set Password (leave blank to keep existing)")
+        col7, col8 = st.columns(2)
+        with col7:
+            new_password = st.text_input("New Password", type="password", placeholder="Min. 8 characters")
+        with col8:
+            confirm_password = st.text_input("Confirm Password", type="password")
+
+        submitted = st.form_submit_button("Save Changes", type="primary")
+
+    if submitted:
+        if not firstname or not lastname or not email:
+            st.warning("First name, last name, and email are required.")
+        elif new_password and new_password != confirm_password:
+            st.warning("Passwords do not match.")
+        elif new_password and len(new_password) < 8:
+            st.warning("Password must be at least 8 characters.")
+        else:
+            payload = {
+                "firstname": firstname,
+                "lastname": lastname,
+                "email": email,
+                "languages": [x.strip() for x in languages.split(",") if x.strip()],
+                "skills": [x.strip() for x in skills.split(",") if x.strip()],
+                "roles": [x.strip() for x in roles_val.split(",") if x.strip()],
+                "organization_id": org_options[selected_org],
+                "app_role": app_role,
+            }
+            if new_password:
+                payload["password"] = new_password
+            try:
+                api_put(f"/api/users/{user['id']}", payload)
+                st.success("User updated.")
+                st.session_state.pop("editing_user", None)
+                st.rerun()
+            except Exception as e:
+                st.error(str(e))
+
+
+# ── Partner Admin Panel ────────────────────────────────────────────────────
+
+def show_partner_sidebar():
+    with st.sidebar:
+        st.markdown("### ⚙️ HyOpps")
+        user = st.session_state.get("user", {})
+        st.caption(f"🏢 {user.get('firstname','')} {user.get('lastname','')}  ·  `partner admin`")
+        st.divider()
+
+        pages = {
+            "🏠 Dashboard": "partner_dashboard",
+            "➕ Add User": "partner_add_user",
+            "📋 Workflows": "partner_executions",
+        }
+        current = st.session_state.get("page", "partner_dashboard")
+        for label, key in pages.items():
+            if st.button(label, use_container_width=True,
+                         type="primary" if current == key else "secondary"):
+                st.session_state["page"] = key
+                st.session_state.pop("partner_viewing_exec_id", None)
+                st.rerun()
+
+        st.divider()
+        if st.button("Sign Out", use_container_width=True):
+            for k in list(st.session_state.keys()):
+                st.session_state.pop(k, None)
+            st.rerun()
+
+
+def show_partner_dashboard():
+    try:
+        overview = api_get("/api/partner/me")
+    except Exception as e:
+        st.error(f"Failed to load organization: {e}")
+        return
+
+    st.markdown(f"## {overview['name']}")
+    st.caption(" · ".join(overview.get("account_types", ["partner"])))
+    st.divider()
+
+    users = overview.get("users", [])
+    st.markdown(f"### Team Members ({len(users)})")
+
+    if not users:
+        st.info("No users onboarded yet. Use 'Add User' to onboard your first team member.")
+    else:
+        for u in users:
+            with st.container(border=True):
+                c1, c2, c3 = st.columns([3, 2, 2])
+                with c1:
+                    st.markdown(f"**{u['firstname']} {u['lastname']}**")
+                    st.caption(u["email"])
+                with c2:
+                    icon = _role_icon(u["app_role"])
+                    st.markdown(f"{icon} `{u['app_role']}`")
+                with c3:
+                    st.caption(f"Joined: {u['created_at'][:10] if u.get('created_at') else '—'}")
+
+    integ = overview.get("integrations")
+    if integ:
+        st.divider()
+        st.markdown("### Integrations")
+        ic1, ic2, ic3 = st.columns(3)
+        with ic1:
+            kc = "✅" if integ.get("keycloak_confirmed") else "⏳"
+            st.metric("KeyCloak", kc)
+        with ic2:
+            mb = "✅" if integ.get("metabase_collection_id") else "⏳"
+            st.metric("Metabase", mb)
+        with ic3:
+            lms = "✅" if integ.get("lms_confirmed") else "⏳"
+            st.metric("LMS", lms)
+
+
+def show_partner_add_user():
+    st.markdown("## Add New User")
+    st.caption("Starts the onboarding workflow for a new team member in your organization.")
+
+    if st.button("Start Onboarding", type="primary"):
+        with st.spinner("Preparing workflow…"):
+            try:
+                ex = api_post("/api/partner/executions")
+                time.sleep(0.5)
+                st.session_state["partner_viewing_exec_id"] = ex["id"]
+                st.session_state["page"] = "partner_execution_detail"
+                st.rerun()
+            except Exception as e:
+                st.error(f"Failed to start workflow: {e}")
+
+
+def show_partner_executions():
+    st.markdown("## Onboarding Workflows")
+
+    if st.button("＋ Add New User", type="primary"):
+        st.session_state["page"] = "partner_add_user"
+        st.rerun()
+
+    st.divider()
+
+    try:
+        executions = api_get("/api/partner/executions")
+    except Exception as e:
+        st.error(f"Failed to load workflows: {e}")
+        return
+
+    if not executions:
+        st.info("No onboarding workflows yet.")
+        return
+
+    for ex in executions:
+        with st.container(border=True):
+            c1, c2, c3, c4 = st.columns([3, 2, 2, 1])
+            with c1:
+                st.markdown("**New Partner User**")
+                st.caption(f"`{ex['id'][:8]}…`")
+            with c2:
+                st.markdown(f"**User:** {ex.get('user_email') or '—'}")
+                st.caption(f"Step {ex['current_step_order']}")
+            with c3:
+                st.markdown(status_badge(ex["status"]), unsafe_allow_html=True)
+            with c4:
+                if st.button("View", key=f"pview_{ex['id']}", use_container_width=True):
+                    st.session_state["partner_viewing_exec_id"] = ex["id"]
+                    st.session_state["page"] = "partner_execution_detail"
+                    st.rerun()
+
+
+def show_partner_execution_detail():
+    exec_id = st.session_state.get("partner_viewing_exec_id")
+    if not exec_id:
+        st.session_state["page"] = "partner_executions"
+        st.rerun()
+
+    if st.button("← All Workflows"):
+        st.session_state.pop("partner_viewing_exec_id", None)
+        st.session_state["page"] = "partner_executions"
+        st.rerun()
+
+    try:
+        ex = api_get(f"/api/partner/executions/{exec_id}")
+    except Exception as e:
+        st.error(f"Failed to load workflow: {e}")
+        return
+
+    _show_execution_view(ex, exec_api_base="/api/partner/executions")
 
 
 # ── Main ───────────────────────────────────────────────────────────────────
@@ -646,24 +956,39 @@ def main():
         show_login()
         return
 
-    show_sidebar()
+    user = st.session_state.get("user", {})
+    role = user.get("app_role", "user")
 
-    page = st.session_state.get("page", "executions")
-
-    if page == "executions":
-        show_executions()
-    elif page == "new_execution":
-        show_new_execution()
-    elif page == "execution_detail":
-        show_execution_detail()
-    elif page == "organizations":
-        show_organizations()
-    elif page == "org_detail":
-        show_org_detail()
-    elif page == "users":
-        show_users()
+    if role == "partner_admin":
+        show_partner_sidebar()
+        page = st.session_state.get("page", "partner_dashboard")
+        if page == "partner_dashboard":
+            show_partner_dashboard()
+        elif page == "partner_add_user":
+            show_partner_add_user()
+        elif page == "partner_executions":
+            show_partner_executions()
+        elif page == "partner_execution_detail":
+            show_partner_execution_detail()
+        else:
+            show_partner_dashboard()
     else:
-        show_executions()
+        show_sidebar()
+        page = st.session_state.get("page", "executions")
+        if page == "executions":
+            show_executions()
+        elif page == "new_execution":
+            show_new_execution()
+        elif page == "execution_detail":
+            show_execution_detail()
+        elif page == "organizations":
+            show_organizations()
+        elif page == "org_detail":
+            show_org_detail()
+        elif page == "users":
+            show_users()
+        else:
+            show_executions()
 
 
 if __name__ == "__main__":
