@@ -621,9 +621,11 @@ def show_org_detail():
 
     col1, col2 = st.columns(2)
 
+    groups = org.get("system_groups", [])
+    groups_by_tool = {g["tool"]: g for g in groups}
+
     with col1:
         st.markdown("### System Groups")
-        groups = org.get("system_groups", [])
         if not groups:
             st.caption("None provisioned yet.")
         else:
@@ -660,6 +662,92 @@ def show_org_detail():
         with ic3:
             lms = "✅ Confirmed" if integ.get("lms_confirmed") else "⏳ Pending"
             st.metric("LMS", lms)
+
+    # ── Documentation links ────────────────────────────────────────────────────
+    st.divider()
+    st.markdown("### Documentation Links")
+    doc = org.get("documentation") or {}
+    doc_fields = [
+        ("Internal Documentation", "internal_docu"),
+        ("General Documentation",  "generique_docu"),
+        ("Additional Documentation", "add_docu"),
+    ]
+
+    any_doc = any(doc.get(k) for _, k in doc_fields)
+    if any_doc:
+        for label, key in doc_fields:
+            url = doc.get(key)
+            if url:
+                st.markdown(f"**{label}:** [{url}]({url})")
+    else:
+        st.caption("No documentation links configured yet.")
+
+    with st.expander("Edit documentation links"):
+        doc_id_key = f"doc_{org_id}"
+        with st.form(doc_id_key):
+            internal = st.text_input(
+                "Internal Documentation URL",
+                value=doc.get("internal_docu") or "",
+                placeholder="https://internal.example.com/docs/partner-xyz",
+            )
+            generique = st.text_input(
+                "General Documentation URL",
+                value=doc.get("generique_docu") or "",
+                placeholder="https://docs.example.com",
+            )
+            add = st.text_input(
+                "Additional Documentation URL",
+                value=doc.get("add_docu") or "",
+                placeholder="https://example.com/getting-started",
+            )
+            doc_submitted = st.form_submit_button("Save Links", type="primary")
+        if doc_submitted:
+            try:
+                api_put(f"/api/organizations/{org_id}/documentation", {
+                    "internal_docu": internal.strip() or None,
+                    "generique_docu": generique.strip() or None,
+                    "add_docu": add.strip() or None,
+                })
+                st.success("Documentation links saved.")
+                st.rerun()
+            except Exception as e:
+                st.error(str(e))
+
+    st.divider()
+    with st.expander("Edit / add group IDs"):
+        grp_tools = [
+            ("metabase", "Metabase", "Permission group integer ID, e.g. 12"),
+            ("teams",    "Teams",    "Teams channel / group ID"),
+            ("slack",    "Slack",    "Slack usergroup ID"),
+        ]
+        gcols = st.columns(len(grp_tools))
+        for i, (tool, label, id_hint) in enumerate(grp_tools):
+            existing_g = groups_by_tool.get(tool, {})
+            id_key   = f"grp_id_{tool}_{org_id}"
+            name_key = f"grp_name_{tool}_{org_id}"
+            # Seed session state from DB only on first render (preserve user edits)
+            if id_key not in st.session_state:
+                st.session_state[id_key] = existing_g.get("external_id") or ""
+            if name_key not in st.session_state:
+                st.session_state[name_key] = existing_g.get("external_name") or ""
+            with gcols[i]:
+                st.markdown(f"**{label}**")
+                ext_id   = st.text_input("External ID",   key=id_key,   placeholder=id_hint)
+                ext_name = st.text_input("Display name",  key=name_key, placeholder="ext-partnerA")
+                if st.button(f"Save {label}", key=f"grp_save_{tool}_{org_id}", use_container_width=True):
+                    try:
+                        api_put(f"/api/organizations/{org_id}/groups", {
+                            "tool": tool,
+                            "external_id": ext_id.strip() or None,
+                            "external_name": ext_name.strip() or None,
+                        })
+                        # Clear so next render re-seeds from DB
+                        st.session_state.pop(id_key, None)
+                        st.session_state.pop(name_key, None)
+                        st.success(f"{label} saved.")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(str(e))
 
 
 # ── Users ──────────────────────────────────────────────────────────────────
@@ -800,6 +888,89 @@ def _show_edit_user_form(user: dict):
                 st.rerun()
             except Exception as e:
                 st.error(str(e))
+
+    st.divider()
+    st.markdown("### Metabase Group Membership")
+
+    # Show persisted feedback from the previous rerun
+    _mb_msg_key = f"mb_msg_{user['id']}"
+    if _mb_msg_key in st.session_state:
+        msg = st.session_state.pop(_mb_msg_key)
+        if msg.get("type") == "success":
+            st.success(msg["text"])
+        else:
+            st.error(msg["text"])
+
+    # Load available groups and current memberships
+    mb_groups = []
+    mb_status = None
+    mb_fetch_error = None
+    try:
+        mb_groups = api_get("/api/metabase/groups")
+    except Exception as e:
+        mb_fetch_error = str(e)
+    try:
+        mb_status = api_get(f"/api/users/{user['id']}/metabase")
+    except Exception as e:
+        mb_fetch_error = str(e)
+
+    if mb_fetch_error:
+        st.warning(f"Could not reach Metabase: {mb_fetch_error}")
+    elif mb_status is None:
+        st.caption("No Metabase data available.")
+    else:
+        mb_user_id = mb_status.get("metabase_user_id")
+        current_memberships = mb_status.get("group_memberships", [])
+        current_group_ids = {m["group_id"] for m in current_memberships}
+
+        # Account status line
+        if mb_user_id:
+            st.caption(f"Metabase account ID: {mb_user_id}")
+        else:
+            st.caption("No Metabase account stored yet — one will be created automatically when adding to a group.")
+
+        # Current memberships
+        if current_memberships:
+            st.caption("Current memberships:")
+            for m in current_memberships:
+                mcol_name, mcol_btn = st.columns([4, 1])
+                with mcol_name:
+                    st.write(m["group_name"])
+                with mcol_btn:
+                    if st.button("Remove", key=f"mb_rem_{user['id']}_{m['group_id']}", use_container_width=True):
+                        try:
+                            api_delete(f"/api/users/{user['id']}/metabase/{m['group_id']}")
+                            st.session_state[_mb_msg_key] = {"type": "success", "text": f"Removed from {m['group_name']}."}
+                        except Exception as e:
+                            st.session_state[_mb_msg_key] = {"type": "error", "text": str(e)}
+                        st.rerun()
+        elif mb_user_id:
+            st.caption("Not a member of any Metabase permission group.")
+
+        # Add to a group
+        available_groups = [g for g in mb_groups if g["id"] not in current_group_ids]
+        if available_groups:
+            group_options = {g["name"]: g["id"] for g in available_groups}
+            selected_name = st.selectbox(
+                "Add to group",
+                options=list(group_options.keys()),
+                key=f"mb_select_{user['id']}",
+            )
+            if st.button("Add to group", key=f"mb_add_{user['id']}", type="primary"):
+                try:
+                    result = api_post(
+                        f"/api/users/{user['id']}/metabase",
+                        {"group_id": group_options[selected_name]},
+                    )
+                    if result.get("account_created"):
+                        st.session_state[_mb_msg_key] = {"type": "success", "text": f"Metabase account created and added to {selected_name}."}
+                    else:
+                        st.session_state[_mb_msg_key] = {"type": "success", "text": f"Added to {selected_name}."}
+                except Exception as e:
+                    st.session_state[_mb_msg_key] = {"type": "error", "text": str(e)}
+                st.rerun()
+        elif mb_groups:
+            st.caption("User is already a member of all available groups.")
 
 
 # ── Partner Admin Panel ────────────────────────────────────────────────────

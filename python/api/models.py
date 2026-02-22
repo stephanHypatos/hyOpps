@@ -53,3 +53,19 @@ class UpdateUserRequest(BaseModel):
 class UpdateOrganizationRequest(BaseModel):
     name: Optional[str] = None
     account_types: Optional[list[str]] = None
+
+
+class UpsertSystemGroupRequest(BaseModel):
+    tool: str                            # "metabase" | "teams" | "slack"
+    external_id: Optional[str] = None   # e.g. "12345" (Metabase group ID as string)
+    external_name: Optional[str] = None  # display name, e.g. "ext-partnerA"
+
+
+class MetabaseGroupRequest(BaseModel):
+    group_id: int  # Metabase permission group ID
+
+
+class UpsertDocumentationRequest(BaseModel):
+    internal_docu: Optional[str] = None    # URL for internal / partner-specific docs
+    generique_docu: Optional[str] = None   # URL for generic / product docs
+    add_docu: Optional[str] = None         # URL for any additional documentation

@@ -61,6 +61,18 @@ def _apply_step_output(execution_id: str, step_name: str, output: dict, conn) ->
         )
         return
 
+    if step_name == "add_user_to_metabase_group" and output.get("metabase_user_id"):
+        mb_user_id = int(output["metabase_user_id"])
+        if user_id:
+            conn.execute("UPDATE users SET metabase_user_id=? WHERE id=?", (mb_user_id, user_id))
+        else:
+            # user_id not yet on execution row — fall back to email lookup from context
+            ctx = _build_context(execution_id, conn)
+            email = ctx.get("email", "").strip().lower()
+            if email:
+                conn.execute("UPDATE users SET metabase_user_id=? WHERE email=?", (mb_user_id, email))
+        return
+
     if not org_id:
         return
 

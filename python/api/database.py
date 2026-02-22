@@ -18,8 +18,62 @@ def get_db() -> sqlite3.Connection:
     return conn
 
 
+def _migrate(conn) -> None:
+    """Apply incremental schema migrations to existing databases."""
+    # Migration: add partner_admin to app_role CHECK constraint.
+    # SQLite can't ALTER a column's CHECK, so we recreate the table.
+    row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='users'"
+    ).fetchone()
+    if row and "partner_admin" not in row["sql"]:
+        conn.execute("PRAGMA foreign_keys=OFF")
+        conn.execute("ALTER TABLE users RENAME TO _users_migrate")
+        conn.execute("""
+            CREATE TABLE users (
+                id              TEXT PRIMARY KEY,
+                firstname       TEXT NOT NULL,
+                lastname        TEXT NOT NULL,
+                email           TEXT NOT NULL UNIQUE,
+                languages       TEXT NOT NULL DEFAULT '[]',
+                skills          TEXT NOT NULL DEFAULT '[]',
+                roles           TEXT NOT NULL DEFAULT '[]',
+                organization_id TEXT REFERENCES organizations(id),
+                app_role        TEXT NOT NULL DEFAULT 'user'
+                                CHECK (app_role IN ('admin', 'user', 'partner_admin')),
+                password_hash   TEXT NOT NULL,
+                created_at      TEXT DEFAULT (datetime('now'))
+            )
+        """)
+        conn.execute("INSERT INTO users SELECT * FROM _users_migrate")
+        conn.execute("DROP TABLE _users_migrate")
+        conn.commit()
+        conn.execute("PRAGMA foreign_keys=ON")
+
+    # Migration: add metabase_user_id column to users table.
+    existing_cols = {r["name"] for r in conn.execute("PRAGMA table_info(users)").fetchall()}
+    if "metabase_user_id" not in existing_cols:
+        conn.execute("ALTER TABLE users ADD COLUMN metabase_user_id INTEGER")
+        conn.commit()
+
+    # Migration: add organization_documentation table.
+    existing_tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+    if "organization_documentation" not in existing_tables:
+        conn.execute("""
+            CREATE TABLE organization_documentation (
+                id              TEXT PRIMARY KEY,
+                organization_id TEXT NOT NULL UNIQUE REFERENCES organizations(id),
+                internal_docu   TEXT,
+                generique_docu  TEXT,
+                add_docu        TEXT,
+                updated_at      TEXT DEFAULT (datetime('now'))
+            )
+        """)
+        conn.commit()
+
+
 def create_schema() -> None:
     conn = get_db()
+    _migrate(conn)
     conn.executescript("""
         CREATE TABLE IF NOT EXISTS organizations (
             id            TEXT PRIMARY KEY,
@@ -29,17 +83,18 @@ def create_schema() -> None:
         );
 
         CREATE TABLE IF NOT EXISTS users (
-            id              TEXT PRIMARY KEY,
-            firstname       TEXT NOT NULL,
-            lastname        TEXT NOT NULL,
-            email           TEXT NOT NULL UNIQUE,
-            languages       TEXT NOT NULL DEFAULT '[]',
-            skills          TEXT NOT NULL DEFAULT '[]',
-            roles           TEXT NOT NULL DEFAULT '[]',
-            organization_id TEXT REFERENCES organizations(id),
-            app_role        TEXT NOT NULL DEFAULT 'user' CHECK (app_role IN ('admin', 'user')),
-            password_hash   TEXT NOT NULL,
-            created_at      TEXT DEFAULT (datetime('now'))
+            id               TEXT PRIMARY KEY,
+            firstname        TEXT NOT NULL,
+            lastname         TEXT NOT NULL,
+            email            TEXT NOT NULL UNIQUE,
+            languages        TEXT NOT NULL DEFAULT '[]',
+            skills           TEXT NOT NULL DEFAULT '[]',
+            roles            TEXT NOT NULL DEFAULT '[]',
+            organization_id  TEXT REFERENCES organizations(id),
+            app_role         TEXT NOT NULL DEFAULT 'user' CHECK (app_role IN ('admin', 'user', 'partner_admin')),
+            password_hash    TEXT NOT NULL,
+            metabase_user_id INTEGER,
+            created_at       TEXT DEFAULT (datetime('now'))
         );
 
         CREATE TABLE IF NOT EXISTS studio_companies (
@@ -153,6 +208,15 @@ def create_schema() -> None:
             studio_id  TEXT NOT NULL UNIQUE,
             name       TEXT NOT NULL,
             created_at TEXT DEFAULT (datetime('now'))
+        );
+
+        CREATE TABLE IF NOT EXISTS organization_documentation (
+            id              TEXT PRIMARY KEY,
+            organization_id TEXT NOT NULL UNIQUE REFERENCES organizations(id),
+            internal_docu   TEXT,
+            generique_docu  TEXT,
+            add_docu        TEXT,
+            updated_at      TEXT DEFAULT (datetime('now'))
         );
     """)
     conn.commit()

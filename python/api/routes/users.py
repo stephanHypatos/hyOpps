@@ -2,7 +2,7 @@ import json
 from fastapi import APIRouter, HTTPException, Depends
 from ..database import get_db
 from ..auth import require_admin, hash_password
-from ..models import UpdateUserRequest
+from ..models import UpdateUserRequest, MetabaseGroupRequest
 
 router = APIRouter()
 
@@ -92,6 +92,89 @@ def delete_user(user_id: str, admin=Depends(require_admin)):
     conn.commit()
     conn.close()
     return {"ok": True}
+
+
+@router.get("/{user_id}/metabase")
+def get_user_metabase_status(user_id: str, admin=Depends(require_admin)):
+    """Return the user's stored Metabase ID and current group memberships."""
+    conn = get_db()
+    user = conn.execute("SELECT * FROM users WHERE id=?", (user_id,)).fetchone()
+    conn.close()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    mb_user_id = user["metabase_user_id"]
+    if not mb_user_id:
+        return {"metabase_user_id": None, "email": user["email"], "group_memberships": []}
+
+    from ..integrations.metabase import get_user_group_memberships
+    try:
+        memberships = get_user_group_memberships(mb_user_id)
+        return {"metabase_user_id": mb_user_id, "email": user["email"], "group_memberships": memberships}
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Metabase error: {str(e)}")
+
+
+@router.post("/{user_id}/metabase")
+def add_user_to_metabase(user_id: str, body: MetabaseGroupRequest, admin=Depends(require_admin)):
+    """
+    Add user to a Metabase permission group.
+    If the user has no stored Metabase ID, find or create their account first and persist the ID.
+    """
+    conn = get_db()
+    user = conn.execute("SELECT * FROM users WHERE id=?", (user_id,)).fetchone()
+    if not user:
+        conn.close()
+        raise HTTPException(status_code=404, detail="User not found")
+
+    from ..integrations.metabase import get_user_by_email, create_user, add_to_group
+    try:
+        mb_user_id = user["metabase_user_id"]
+        account_created = False
+
+        if not mb_user_id:
+            # Check if user already exists in Metabase by email
+            mb_user = get_user_by_email(user["email"])
+            if mb_user:
+                mb_user_id = mb_user["id"]
+            else:
+                new_user = create_user(user["email"], user["firstname"], user["lastname"])
+                mb_user_id = new_user["id"]
+                account_created = True
+            # Persist so future calls skip the lookup
+            conn.execute("UPDATE users SET metabase_user_id=? WHERE id=?", (mb_user_id, user_id))
+            conn.commit()
+
+        conn.close()
+        add_to_group(mb_user_id, body.group_id)
+        return {"ok": True, "metabase_user_id": mb_user_id, "group_id": body.group_id, "account_created": account_created}
+    except HTTPException:
+        conn.close()
+        raise
+    except Exception as e:
+        conn.close()
+        raise HTTPException(status_code=502, detail=f"Metabase error: {str(e)}")
+
+
+@router.delete("/{user_id}/metabase/{group_id}")
+def remove_user_from_metabase(user_id: str, group_id: int, admin=Depends(require_admin)):
+    """Remove the user from a specific Metabase permission group."""
+    conn = get_db()
+    user = conn.execute("SELECT * FROM users WHERE id=?", (user_id,)).fetchone()
+    conn.close()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    mb_user_id = user["metabase_user_id"]
+    if not mb_user_id:
+        raise HTTPException(status_code=404, detail="User has no stored Metabase account ID")
+
+    from ..integrations.metabase import remove_from_group
+    try:
+        removed = remove_from_group(mb_user_id, group_id)
+        return {"ok": True, "removed": removed}
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Metabase error: {str(e)}")
 
 
 @router.get("/{user_id}/access")
